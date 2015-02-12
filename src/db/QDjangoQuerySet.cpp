@@ -25,6 +25,318 @@
 #include "QDjangoQuerySet.h"
 #include "QDjangoWhere_p.h"
 
+
+/** Constructs a new queryset.
+ */
+QDjangoQuerySet::QDjangoQuerySet(const QMetaObject &meta):
+    m_metaObject(meta)
+{
+    d = new QDjangoQuerySetPrivate(meta.className());
+}
+
+/** Constructs a copy of \a other.
+ *
+ * \param other
+ */
+QDjangoQuerySet::QDjangoQuerySet(const QDjangoQuerySet &other):
+    m_metaObject(other.m_metaObject)
+{
+    other.d->counter.ref();
+    d = other.d;
+}
+
+/** Destroys the queryset.
+ */
+QDjangoQuerySet::~QDjangoQuerySet()
+{
+    if (!d->counter.deref())
+        delete d;
+}
+
+/** Returns the object in the QDjangoQuerySet at the given index.
+ *
+ *  Returns 0 if the index is out of bounds.
+ *
+ *  If target is 0, a new object instance will be allocated which
+ *  you must free yourself.
+ *
+ * \param index
+ * \param target optional existing model instance.
+ */
+QObject *QDjangoQuerySet::at(int index, QObject *target)
+{
+    QObject *entry = target ? target : m_metaObject.newInstance();
+    if (!d->sqlLoad(entry, index))
+    {
+        if (!target)
+            delete entry;
+        return 0;
+    }
+    return entry;
+}
+
+/** Returns a const STL-style iterator pointing to the first object in the QDjangoQuerySet.
+ *
+ *  \sa begin() and constEnd().
+ */
+typename QDjangoQuerySet::const_iterator QDjangoQuerySet::constBegin() const
+{
+    return const_iterator(this);
+}
+
+/** Returns a const STL-style iterator pointing to the first object in the QDjangoQuerySet.
+ *
+ *  \sa constBegin() and end().
+ */
+typename QDjangoQuerySet::const_iterator QDjangoQuerySet::begin() const
+{
+    return const_iterator(this);
+}
+
+/** Returns a const STL-style iterator pointing to the imaginary object after the last
+ *  object in the QDjangoQuerySet.
+ *
+ *  \sa constBegin() and end().
+ */
+typename QDjangoQuerySet::const_iterator QDjangoQuerySet::constEnd() const
+{
+    return const_iterator(this, QDjangoQuerySet::count());
+}
+
+/** Returns a const STL-style iterator pointing to the imaginary object after the last
+ *  object in the QDjangoQuerySet.
+ *
+ *  \sa begin() and constEnd().
+ */
+typename QDjangoQuerySet::const_iterator QDjangoQuerySet::end() const
+{
+    return const_iterator(this, QDjangoQuerySet::count());
+}
+
+/** Returns a copy of the current QDjangoQuerySet.
+ */
+QDjangoQuerySet QDjangoQuerySet::all() const
+{
+    QDjangoQuerySet other(m_metaObject);
+    other.d->lowMark = d->lowMark;
+    other.d->highMark = d->highMark;
+    other.d->orderBy = d->orderBy;
+    other.d->selectRelated = d->selectRelated;
+    other.d->whereClause = d->whereClause;
+    return other;
+}
+
+/** Counts the number of objects in the queryset using an SQL COUNT query,
+ *  or -1 if the query failed.
+ *
+ *  If you intend to iterate over the results, you should consider using
+ *  size() instead.
+ *
+ * \note If the QDjangoQuerySet is already fully fetched, this simply returns
+ *  the number of objects.
+ */
+int QDjangoQuerySet::count() const
+{
+    if (d->hasResults)
+        return d->properties.size();
+
+    // execute COUNT query
+    QDjangoQuery query(d->countQuery());
+    if (!query.exec() || !query.next())
+        return -1;
+    return query.value(0).toInt();
+}
+
+/** Returns a new QDjangoQuerySet containing objects for which the given key
+ *  where condition is false.
+ *
+ *  You can chain calls to filter() and exclude() to further refine the
+ *  filtering conditions.
+ *
+ * \param where QDjangoWhere expressing the exclude condition
+ *
+ * \sa filter()
+ */
+QDjangoQuerySet QDjangoQuerySet::exclude(const QDjangoWhere &where) const
+{
+    QDjangoQuerySet other = all();
+    other.d->addFilter(!where);
+    return other;
+}
+
+/** Returns a new QDjangoQuerySet containing objects for which the given
+ *  where condition is true.
+ *
+ *  You can chain calls to filter() and exclude() to progressively refine
+ *  your filtering conditions.
+ *
+ * \param where QDjangoWhere expressing the filter condition
+ *
+ * \sa exclude()
+ */
+QDjangoQuerySet QDjangoQuerySet::filter(const QDjangoWhere &where) const
+{
+    QDjangoQuerySet other = all();
+    other.d->addFilter(where);
+    return other;
+}
+
+/** Returns the object in the QDjangoQuerySet for which the given
+ *  where condition is true.
+ *
+ *  Returns 0 if the number of matching object is not exactly one.
+ *
+ *  If target is 0, a new object instance will be allocated which
+ *  you must free yourself.
+ *
+ * \param where QDjangoWhere expressing the lookup condition
+ * \param target optional existing model instance.
+ */
+QObject *QDjangoQuerySet::get(const QDjangoWhere &where, QObject *target) const
+{
+    QDjangoQuerySet qs = filter(where);
+    return qs.size() == 1 ? qs.at(0, target) : 0;
+}
+
+/** Returns a new QDjangoQuerySet containing limiting the number of
+ *  records to manipulate.
+ *
+ *  You can chain calls to limit() to further restrict the number
+ *  of returned records.
+ *
+ *  However, you cannot apply additional restrictions using filter(),
+ *  exclude(), get(), orderBy() or remove() on the returned QDjangoQuerySet.
+ *
+ * \param pos offset of the records
+ * \param length maximum number of records
+ */
+QDjangoQuerySet QDjangoQuerySet::limit(int pos, int length) const
+{
+    Q_ASSERT(pos >= 0);
+    Q_ASSERT(length >= -1);
+
+    QDjangoQuerySet other = all();
+    other.d->lowMark += pos;
+    if (length > 0)
+    {
+        // calculate new high mark
+        other.d->highMark = other.d->lowMark + length;
+        // never exceed the current high mark
+        if (d->highMark > 0 && other.d->highMark > d->highMark)
+            other.d->highMark = d->highMark;
+    }
+    return other;
+}
+
+/** Returns an empty QDjangoQuerySet.
+ */
+QDjangoQuerySet QDjangoQuerySet::none() const
+{
+    QDjangoQuerySet other(m_metaObject);
+    other.d->whereClause = !QDjangoWhere();
+    return other;
+}
+
+/** Returns a QDjangoQuerySet whose elements are ordered using the given keys.
+ *
+ *  By default the elements will by in ascending order. You can prefix the key
+ *  names with a "-" (minus sign) to use descending order.
+ *
+ * \param keys
+ */
+QDjangoQuerySet QDjangoQuerySet::orderBy(const QStringList &keys) const
+{
+    // it is not possible to change ordering once a limit has been set
+    Q_ASSERT(!d->lowMark && !d->highMark);
+
+    QDjangoQuerySet other = all();
+    other.d->orderBy << keys;
+    return other;
+}
+
+/** Deletes all objects in the QDjangoQuerySet.
+ *
+ * \return true if deletion succeeded, false otherwise
+ */
+bool QDjangoQuerySet::remove()
+{
+    return d->sqlDelete();
+}
+
+/** Returns a QDjangoQuerySet that will automatically "follow" foreign-key
+ *  relationships, selecting that additional related-object data when it
+ *  executes its query.
+ */
+QDjangoQuerySet QDjangoQuerySet::selectRelated() const
+{
+    QDjangoQuerySet other = all();
+    other.d->selectRelated = true;
+    return other;
+}
+
+/** Returns the number of objects in the QDjangoQuerySet, or -1
+ *  if the query failed.
+ *
+ *  If you do not plan to access the objects, you should consider using
+ *  count() instead.
+ */
+int QDjangoQuerySet::size()
+{
+    if (!d->sqlFetch())
+        return -1;
+    return d->properties.size();
+}
+
+/** Performs an SQL update query for the specified \a fields and returns the
+ *  number of rows affected, or -1 if the update failed.
+ */
+int QDjangoQuerySet::update(const QVariantMap &fields)
+{
+    return d->sqlUpdate(fields);
+}
+
+/** Returns a list of property hashes for the current QDjangoQuerySet.
+ *  If no \a fields are specified, all the model's declared fields are returned.
+ *
+ * \param fields
+ */
+QList<QVariantMap> QDjangoQuerySet::values(const QStringList &fields)
+{
+    return d->sqlValues(fields);
+}
+
+/** Returns a list of property lists for the current QDjangoQuerySet.
+ *  If no \a fields are specified, all the model's fields are returned in the
+ *  order they where declared.
+ *
+ * \param fields
+ */
+QList<QVariantList> QDjangoQuerySet::valuesList(const QStringList &fields)
+{
+    return d->sqlValuesList(fields);
+}
+
+/** Returns the QDjangoWhere expressing the WHERE clause of the
+ * QDjangoQuerySet.
+ */
+QDjangoWhere QDjangoQuerySet::where() const
+{
+    return d->resolvedWhere(QDjango::database());
+}
+
+/** Assigns the specified queryset to this object.
+ *
+ * \param other
+ */
+QDjangoQuerySet &QDjangoQuerySet::operator=(const QDjangoQuerySet &other)
+{
+    other.d->counter.ref();
+    if (!d->counter.deref())
+        delete d;
+    d = other.d;
+    return *this;
+}
+
 /// \cond
 
 QDjangoCompiler::QDjangoCompiler(const char *modelName, const QSqlDatabase &db)

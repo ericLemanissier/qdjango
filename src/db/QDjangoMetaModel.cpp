@@ -450,7 +450,6 @@ QStringList QDjangoMetaModel::createTableSql() const
 {
     QSqlDatabase db = QDjango::database();
     QSqlDriver *driver = db.driver();
-    QDjangoDatabase::DatabaseType databaseType = QDjangoDatabase::databaseType(db);
 
     QStringList queries;
     QStringList propSql;
@@ -458,164 +457,12 @@ QStringList QDjangoMetaModel::createTableSql() const
     const QString quotedTable = db.driver()->escapeIdentifier(d->table, QSqlDriver::TableName);
     foreach (const QDjangoMetaField &field, d->localFields)
     {
-        QString fieldSql = driver->escapeIdentifier(field.column(), QSqlDriver::FieldName);
-        switch (field.d->type) {
-        case QVariant::Bool:
-            if (databaseType == QDjangoDatabase::PostgreSQL)
-                fieldSql += QLatin1String(" boolean");
-            else if (databaseType == QDjangoDatabase::MSSqlServer)
-                fieldSql += QLatin1String(" bit");
-            else
-                fieldSql += QLatin1String(" bool");
-            break;
-        case QVariant::ByteArray:
-            if (databaseType == QDjangoDatabase::PostgreSQL) {
-                fieldSql += QLatin1String(" bytea");
-            } else if (databaseType == QDjangoDatabase::MSSqlServer) {
-                fieldSql += QLatin1String(" varbinary");
-                if (field.d->maxLength > 0)
-                    fieldSql += QLatin1Char('(') + QString::number(field.d->maxLength) + QLatin1Char(')');
-                else
-                    fieldSql += QLatin1String("(max)");
-            } else {
-                fieldSql += QLatin1String(" blob");
-                if (field.d->maxLength > 0)
-                    fieldSql += QLatin1Char('(') + QString::number(field.d->maxLength) + QLatin1Char(')');
-            }
-            break;
-        case QVariant::Date:
-            fieldSql += QLatin1String(" date");
-            break;
-        case QVariant::DateTime:
-            if (databaseType == QDjangoDatabase::PostgreSQL)
-                fieldSql += QLatin1String(" timestamp");
-            else
-                fieldSql += QLatin1String(" datetime");
-            break;
-        case QVariant::Double:
-            fieldSql += QLatin1String(" real");
-            break;
-        case QVariant::Int:
-            if (databaseType == QDjangoDatabase::MSSqlServer)
-                fieldSql += QLatin1String(" int");
-            else
-                fieldSql += QLatin1String(" integer");
-            break;
-        case QVariant::LongLong:
-            fieldSql += QLatin1String(" bigint");
-            break;
-        case QVariant::String:
-            if (field.d->maxLength > 0) {
-                if (databaseType == QDjangoDatabase::MSSqlServer)
-                    fieldSql += QLatin1String(" nvarchar(") + QString::number(field.d->maxLength) + QLatin1Char(')');
-                else
-                    fieldSql += QLatin1String(" varchar(") + QString::number(field.d->maxLength) + QLatin1Char(')');
-            } else {
-                if (databaseType == QDjangoDatabase::MSSqlServer)
-                    fieldSql += QLatin1String(" nvarchar(max)");
-                else
-                    fieldSql += QLatin1String(" text");
-            }
-            break;
-        case QVariant::Time:
-            fieldSql += QLatin1String(" time");
-            break;
-        default:
-            qWarning() << "Unhandled type" << field.d->type << "for property" << field.d->name;
-            continue;
-        }
-
-        if (!field.d->null)
-            fieldSql += QLatin1String(" NOT NULL");
-        if (field.d->unique)
-            fieldSql += QLatin1String(" UNIQUE");
-
-        // primary key
-        if (field.d->name == d->primaryKey)
-            fieldSql += QLatin1String(" PRIMARY KEY");
-
-        // auto-increment is backend specific
-        if (field.d->autoIncrement) {
-            if (databaseType == QDjangoDatabase::SQLite)
-                // NOTE: django does not add this option for sqlite, but there
-                // is a ticket asking for it to do so:
-                // https://code.djangoproject.com/ticket/10164
-                fieldSql += QLatin1String(" AUTOINCREMENT");
-            else if (databaseType == QDjangoDatabase::MySqlServer)
-                fieldSql += QLatin1String(" AUTO_INCREMENT");
-            else if (databaseType == QDjangoDatabase::PostgreSQL)
-                fieldSql = driver->escapeIdentifier(field.column(), QSqlDriver::FieldName) + QLatin1String(" serial PRIMARY KEY");
-            else if (databaseType == QDjangoDatabase::MSSqlServer)
-                fieldSql += QLatin1String(" IDENTITY(1,1)");
-        }
-
-        // foreign key
-        if (!field.d->foreignModel.isEmpty())
+        propSql << fieldDef(field);
+        const QString &c = fieldConstraint(field);
+        if(!c.isEmpty())
         {
-            const QDjangoMetaModel foreignMeta = QDjango::metaModel(field.d->foreignModel);
-            const QDjangoMetaField foreignField = foreignMeta.localField("pk");
-            if (databaseType == QDjangoDatabase::MySqlServer) {
-                QString constraintName = QString::fromLatin1("FK_%1_%2").arg(
-                    field.column(), stringlist_digest(QStringList() << field.column() << d->table));
-                QString constraint =
-                    QString::fromLatin1("CONSTRAINT %1 FOREIGN KEY (%2) REFERENCES %3 (%4)").arg(
-                        driver->escapeIdentifier(constraintName, QSqlDriver::FieldName),
-                        driver->escapeIdentifier(field.column(), QSqlDriver::FieldName),
-                        driver->escapeIdentifier(foreignMeta.d->table, QSqlDriver::TableName),
-                        driver->escapeIdentifier(foreignField.column(), QSqlDriver::FieldName)
-                    );
-
-                if (field.d->deleteConstraint != NoAction) {
-                    constraint += " ON DELETE";
-                    switch (field.d->deleteConstraint) {
-                    case Cascade:
-                        constraint += " CASCADE";
-                        break;
-                    case SetNull:
-                        constraint += " SET NULL";
-                        break;
-                    case Restrict:
-                        constraint += " RESTRICT";
-                        break;
-                    default:
-                        break;
-                    }
-                }
-
-                constraintSql << constraint;
-            } else {
-                fieldSql += QString::fromLatin1(" REFERENCES %1 (%2)").arg(
-                    driver->escapeIdentifier(foreignMeta.d->table, QSqlDriver::TableName),
-                    driver->escapeIdentifier(foreignField.column(), QSqlDriver::FieldName));
-
-                if (databaseType == QDjangoDatabase::MSSqlServer &&
-                    field.d->deleteConstraint == Restrict) {
-                    qWarning("MSSQL does not support RESTRICT constraints");
-                    break;
-                }
-
-                if (field.d->deleteConstraint != NoAction) {
-                    fieldSql += " ON DELETE";
-                    switch (field.d->deleteConstraint) {
-                    case Cascade:
-                        fieldSql += " CASCADE";
-                        break;
-                    case SetNull:
-                        fieldSql += " SET NULL";
-                        break;
-                    case Restrict:
-                        fieldSql += " RESTRICT";
-                        break;
-                    default:
-                        break;
-                    }
-                }
-            }
-
-            if (databaseType == QDjangoDatabase::PostgreSQL)
-                fieldSql += " DEFERRABLE INITIALLY DEFERRED";
+            constraintSql << c;
         }
-        propSql << fieldSql;
     }
 
     // add constraints if we need them
@@ -665,7 +512,190 @@ bool QDjangoMetaModel::dropTable() const
 
     QDjangoQuery query(db);
     return query.exec(QLatin1String("DROP TABLE ") +
-        db.driver()->escapeIdentifier(d->table, QSqlDriver::TableName));
+                      db.driver()->escapeIdentifier(d->table, QSqlDriver::TableName));
+}
+
+QString QDjangoMetaModel::fieldDef(QDjangoMetaField field) const
+{
+    QSqlDatabase db = QDjango::database();
+    QSqlDriver *driver = db.driver();
+    QDjangoDatabase::DatabaseType databaseType = QDjangoDatabase::databaseType(db);
+
+    QString fieldSql = driver->escapeIdentifier(field.column(), QSqlDriver::FieldName);
+    switch (field.d->type) {
+    case QVariant::Bool:
+        if (databaseType == QDjangoDatabase::PostgreSQL)
+            fieldSql += QLatin1String(" boolean");
+        else if (databaseType == QDjangoDatabase::MSSqlServer)
+            fieldSql += QLatin1String(" bit");
+        else
+            fieldSql += QLatin1String(" bool");
+        break;
+    case QVariant::ByteArray:
+        if (databaseType == QDjangoDatabase::PostgreSQL) {
+            fieldSql += QLatin1String(" bytea");
+        } else if (databaseType == QDjangoDatabase::MSSqlServer) {
+            fieldSql += QLatin1String(" varbinary");
+            if (field.d->maxLength > 0)
+                fieldSql += QLatin1Char('(') + QString::number(field.d->maxLength) + QLatin1Char(')');
+            else
+                fieldSql += QLatin1String("(max)");
+        } else {
+            fieldSql += QLatin1String(" blob");
+            if (field.d->maxLength > 0)
+                fieldSql += QLatin1Char('(') + QString::number(field.d->maxLength) + QLatin1Char(')');
+        }
+        break;
+    case QVariant::Date:
+        fieldSql += QLatin1String(" date");
+        break;
+    case QVariant::DateTime:
+        if (databaseType == QDjangoDatabase::PostgreSQL)
+            fieldSql += QLatin1String(" timestamp");
+        else
+            fieldSql += QLatin1String(" datetime");
+        break;
+    case QVariant::Double:
+        fieldSql += QLatin1String(" real");
+        break;
+    case QVariant::Int:
+        if (databaseType == QDjangoDatabase::MSSqlServer)
+            fieldSql += QLatin1String(" int");
+        else
+            fieldSql += QLatin1String(" integer");
+        break;
+    case QVariant::LongLong:
+        fieldSql += QLatin1String(" bigint");
+        break;
+    case QVariant::String:
+        if (field.d->maxLength > 0) {
+            if (databaseType == QDjangoDatabase::MSSqlServer)
+                fieldSql += QLatin1String(" nvarchar(") + QString::number(field.d->maxLength) + QLatin1Char(')');
+            else
+                fieldSql += QLatin1String(" varchar(") + QString::number(field.d->maxLength) + QLatin1Char(')');
+        } else {
+            if (databaseType == QDjangoDatabase::MSSqlServer)
+                fieldSql += QLatin1String(" nvarchar(max)");
+            else
+                fieldSql += QLatin1String(" text");
+        }
+        break;
+    case QVariant::Time:
+        fieldSql += QLatin1String(" time");
+        break;
+    default:
+        qWarning() << "Unhandled type" << field.d->type << "for property" << field.d->name;
+        return QString();
+    }
+
+    if (!field.d->null)
+        fieldSql += QLatin1String(" NOT NULL");
+    if (field.d->unique)
+        fieldSql += QLatin1String(" UNIQUE");
+
+    // primary key
+    if (field.d->name == d->primaryKey)
+        fieldSql += QLatin1String(" PRIMARY KEY");
+
+    // auto-increment is backend specific
+    if (field.d->autoIncrement) {
+        if (databaseType == QDjangoDatabase::SQLite)
+            // NOTE: django does not add this option for sqlite, but there
+            // is a ticket asking for it to do so:
+            // https://code.djangoproject.com/ticket/10164
+            fieldSql += QLatin1String(" AUTOINCREMENT");
+        else if (databaseType == QDjangoDatabase::MySqlServer)
+            fieldSql += QLatin1String(" AUTO_INCREMENT");
+        else if (databaseType == QDjangoDatabase::PostgreSQL)
+            fieldSql = driver->escapeIdentifier(field.column(), QSqlDriver::FieldName) + QLatin1String(" serial PRIMARY KEY");
+        else if (databaseType == QDjangoDatabase::MSSqlServer)
+            fieldSql += QLatin1String(" IDENTITY(1,1)");
+    }
+
+    // foreign key
+    if (!field.d->foreignModel.isEmpty())
+    {
+        const QDjangoMetaModel foreignMeta = QDjango::metaModel(field.d->foreignModel);
+        const QDjangoMetaField foreignField = foreignMeta.localField("pk");
+        if (databaseType != QDjangoDatabase::MySqlServer)
+        {
+            fieldSql += QString::fromLatin1(" REFERENCES %1 (%2)").arg(
+                driver->escapeIdentifier(foreignMeta.d->table, QSqlDriver::TableName),
+                driver->escapeIdentifier(foreignField.column(), QSqlDriver::FieldName));
+
+            if (databaseType == QDjangoDatabase::MSSqlServer &&
+                field.d->deleteConstraint == Restrict) {
+                qWarning("MSSQL does not support RESTRICT constraints");
+            }
+
+            if (field.d->deleteConstraint != NoAction) {
+                fieldSql += " ON DELETE";
+                switch (field.d->deleteConstraint) {
+                case Cascade:
+                    fieldSql += " CASCADE";
+                    break;
+                case SetNull:
+                    fieldSql += " SET NULL";
+                    break;
+                case Restrict:
+                    fieldSql += " RESTRICT";
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
+
+        if (databaseType == QDjangoDatabase::PostgreSQL)
+            fieldSql += " DEFERRABLE INITIALLY DEFERRED";
+    }
+    return fieldSql;
+
+}
+
+QString QDjangoMetaModel::fieldConstraint(QDjangoMetaField field) const
+{
+    QSqlDatabase db = QDjango::database();
+    QSqlDriver *driver = db.driver();
+    QDjangoDatabase::DatabaseType databaseType = QDjangoDatabase::databaseType(db);
+
+    if (!field.d->foreignModel.isEmpty())
+    {
+        const QDjangoMetaModel foreignMeta = QDjango::metaModel(field.d->foreignModel);
+        const QDjangoMetaField foreignField = foreignMeta.localField("pk");
+        if (databaseType == QDjangoDatabase::MySqlServer) {
+            QString constraintName = QString::fromLatin1("FK_%1_%2").arg(
+                field.column(), stringlist_digest(QStringList() << field.column() << d->table));
+            QString constraint =
+                QString::fromLatin1("CONSTRAINT %1 FOREIGN KEY (%2) REFERENCES %3 (%4)").arg(
+                    driver->escapeIdentifier(constraintName, QSqlDriver::FieldName),
+                    driver->escapeIdentifier(field.column(), QSqlDriver::FieldName),
+                    driver->escapeIdentifier(foreignMeta.d->table, QSqlDriver::TableName),
+                    driver->escapeIdentifier(foreignField.column(), QSqlDriver::FieldName)
+                );
+
+            if (field.d->deleteConstraint != NoAction) {
+                constraint += " ON DELETE";
+                switch (field.d->deleteConstraint) {
+                case Cascade:
+                    constraint += " CASCADE";
+                    break;
+                case SetNull:
+                    constraint += " SET NULL";
+                    break;
+                case Restrict:
+                    constraint += " RESTRICT";
+                    break;
+                default:
+                    break;
+                }
+            }
+
+            return constraint;
+        }
+    }
+    return QString();
+
 }
 
 /*!

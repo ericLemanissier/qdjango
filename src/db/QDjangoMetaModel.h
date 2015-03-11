@@ -75,6 +75,9 @@ public:
     QStringList createTableSql() const;
     bool dropTable() const;
 
+    QString fieldDef(QDjangoMetaField field) const;
+    QString fieldConstraint(QDjangoMetaField field) const;
+
     void load(QObject *model, const QVariantList &props, int &pos) const;
     bool remove(QObject *model) const;
     bool save(QObject *model) const;

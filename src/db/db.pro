@@ -5,7 +5,7 @@ QT += sql
 
 TARGET = qdjango-db
 win32 {
-    DESTDIR = $$OUT_PWD
+    #DESTDIR = $$OUT_PWD
 }
 
 HEADERS += \
